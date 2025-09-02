@@ -1,6 +1,5 @@
-#   A command-line tool to analyze raw email files (.eml)
-
-#   Usage: python main.py [filepath]
+#   A command-line tool to analyze raw email files (.eml)
+#   Usage: python main.py [filepath]
 
 import sys
 import re
@@ -16,11 +15,11 @@ from urllib.parse import urlparse
 from ipwhois import IPWhois
 import math
 
-VT_API_KEY = "[VirusTotalAPIKey]"
-ABUSEIPDB_API_KEY = "[AbuseIPDBAPIKey]"
-URLSCAN_API_KEY = "[urlscan.ioAPIKey]"
+VT_API_KEY = "[YOUR_VIRUSTOTAL_API_KEY]"
+ABUSEIPDB_API_KEY = "[YOUR_ABUSEIPDB_API_KEY]"
+URLSCAN_API_KEY = "[YOUR_URLSCAN_API_KEY]"
 
-#   Scoring Constants
+#   Scoring Thresholds
 SCORE_THRESHOLD_MALICIOUS = 100
 SCORE_THRESHOLD_SUSPICIOUS = 50
 
@@ -58,29 +57,31 @@ class AdvancedEmailAnalyzer:
     def perform_complete_analysis_on_message(self, message_obj, context):
         html_body = self._get_html_body(message_obj)
         
+        #Indicator Extraction
+        indicators = self.extract_indicators(message_obj, html_body, context)
+        if not indicators:
+            print(f"[!] No indicators found in {context} part.")
+            return
+
+        #   Heuristic and Infrastructure Analysis
         print(f"[!] Running Heuristic & Infrastructure Checks for {context}...")
         self.analyze_subject(message_obj, context)
         self.analyze_sender_mismatch(message_obj, context)
         self.analyze_return_path(message_obj, context)
         self.analyze_html_body_content(html_body, context)
-        
-        print(f"[!] Extracting and Analyzing Indicators for {context}...")
-        indicators = self.extract_indicators(message_obj, html_body, context)
-        
-        if not indicators:
-            print(f"[!] No indicators found in {context} part.")
-            return
-        
         self.analyze_domain_entropy(indicators, context)
         self.analyze_infrastructure(indicators, context)
         
+        #   Reputation Analysis
+        print(f"[!] Running API-based Reputation Checks for {context}...")
         if indicators.get("ip"):
             self.analyze_ip(indicators["ip"], context)
         if indicators.get("domain"):
             self.analyze_domain(indicators["domain"], context)
         if indicators.get("urls"):
-            for url in indicators["urls"]:
-                self.analyze_url(url, context)
+            unique_hostnames = {urlparse(url).hostname for url in indicators["urls"] if urlparse(url).hostname}
+            for hostname in unique_hostnames:
+                self.analyze_url(f"http://{hostname}", context)
 
     #Adds a finding to report and updates risk score
     def add_finding(self, message, context, score=0, is_major=False, finding_type="heuristic"):
@@ -107,7 +108,7 @@ class AdvancedEmailAnalyzer:
                         original_payload = part.get_payload()
                         if original_payload and isinstance(original_payload[0], email.message.Message):
                             self.inner_message = original_payload[0]
-                            self.add_finding("Detected a bounce-back wrapper.", "[Analysis]")
+                            self.add_finding("Detected a bounce-back wrapper.", "[Analysis]", finding_type="meta")
                             break
             return True
         except Exception as e:
@@ -153,7 +154,7 @@ class AdvancedEmailAnalyzer:
         
         return indicators
 
-    #   Heuristic & Infrastructure Functions
+    #   Heuristic & Infrastructure Functions
     def calculate_entropy(self, text):
         if not text:
             return 0
@@ -189,7 +190,7 @@ class AdvancedEmailAnalyzer:
         from_header = message_obj.get('From', '')
         display_name, actual_address = email.utils.parseaddr(from_header)
         actual_domain_match = re.search(r'@([\w.-]+)', actual_address)
-       
+        
         if not actual_domain_match: return
         actual_domain = actual_domain_match.group(1)
         display_domain_match = re.search(r'([\w.-]+\.(com|net|org|io|gov|edu))', display_name, re.IGNORECASE)
@@ -261,20 +262,37 @@ class AdvancedEmailAnalyzer:
             except Exception: 
                 continue
 
-    #   API Analysis Functions ---
+    #   API Analysis Functions
 
-    #Uses VirusTotal to analyze sender IP and retrieves number of vendors who flagged IP as malicious, adding to score accordingly
+    #Uses VirusTotal and AbuseIPDB to analyze sender IP and retrieves number of vendors who flagged IP as malicious, adding to score accordingly
     def analyze_ip(self, ip, context):
-        if VT_API_KEY.startswith("YOUR_"): self.add_finding("VirusTotal API key not set.", context, finding_type="api"); return
-        
-        try:
-            response = requests.get(f"https://www.virustotal.com/api/v3/ip_addresses/{ip}", headers=self.headers)
-            res = response.json().get("data", {}).get("attributes", {})
-            stats = res.get("last_analysis_stats", {})
-            malicious_count = stats.get("malicious", 0)
-            self.add_finding(f"VirusTotal IP: {malicious_count} vendors flagged as malicious.", context, score=malicious_count * 10, is_major=malicious_count > 0, finding_type="api")
-        except requests.RequestException as e: self.add_finding(f"VirusTotal IP check failed: {e}", context, is_major=True, finding_type="api")
-    
+        if not VT_API_KEY.startswith("YOUR_"):
+            try:
+                response = requests.get(f"https://www.virustotal.com/api/v3/ip_addresses/{ip}", headers=self.headers)
+                response.raise_for_status()
+                res = response.json().get("data", {}).get("attributes", {})
+                stats = res.get("last_analysis_stats", {})
+                malicious_count = stats.get("malicious", 0)
+                self.add_finding(f"VirusTotal IP: {malicious_count} vendors flagged as malicious.", context, score=malicious_count * 10, is_major=malicious_count > 0, finding_type="api")
+            except requests.RequestException as e:
+                self.add_finding(f"VirusTotal IP check failed: {e}", context, is_major=True, finding_type="api")
+        else:
+            self.add_finding("VirusTotal API Key not set.", context, finding_type="api")
+
+        if not ABUSEIPDB_API_KEY.startswith("YOUR_"):
+            try:
+                response = requests.get("https://api.abuseipdb.com/api/v2/check",
+                                        headers={"Key": ABUSEIPDB_API_KEY, "Accept": "application/json"},
+                                        params={"ipAddress": ip})
+                response.raise_for_status()
+                res = response.json().get("data", {})
+                score = res.get("abuseConfidenceScore", 0) # CORRECTED KEY
+                self.add_finding(f"AbuseIPDB Confidence Score: {score}%", context, score=score, is_major=score > 50, finding_type="api")
+            except requests.RequestException as e: # CORRECTED EXCEPTION HANDLING
+                self.add_finding(f"AbuseIPDB Check failed: {e}", context, is_major=True, finding_type="api")
+        else:
+            self.add_finding("AbuseIPDB API Key not set.", context, finding_type="api")
+
     #Uses Whois and VirusTotal to check domain
     def analyze_domain(self, domain, context):
         try:
@@ -284,25 +302,17 @@ class AdvancedEmailAnalyzer:
                 age = (datetime.now(timezone.utc) - (created[0] if isinstance(created, list) else created).replace(tzinfo=timezone.utc)).days
                 self.add_finding(f"Domain '{domain}' created {age} days ago.", context, score=50 if age < 90 else 0, is_major=age < 90, finding_type="heuristic")
             else: self.add_finding("Could not determine domain creation date.", context, score=20, is_major=True, finding_type="heuristic")
-        except Exception: self.add_finding(f"WHOIS lookup failed for '{domain}'. It may not be registered.", context, score=60, is_major=True, finding_type="heuristic")      
+        except Exception: self.add_finding(f"WHOIS lookup failed for '{domain}'. It may not be registered.", context, score=60, is_major=True, finding_type="heuristic")
         
         if VT_API_KEY.startswith("YOUR_"): self.add_finding("VirusTotal API key not set.", context, finding_type="api"); return
         try:
             response = requests.get(f"https://www.virustotal.com/api/v3/domains/{domain}", headers=self.headers)
+            response.raise_for_status() # Added to ensure errors are caught
             res = response.json().get("data", {}).get("attributes", {})
             stats = res.get("last_analysis_stats", {})
             malicious_count = stats.get("malicious", 0)
             self.add_finding(f"VirusTotal Domain '{domain}': {malicious_count} vendors flagged as malicious.", context, score=malicious_count * 10, is_major=malicious_count > 0, finding_type="api")
         except requests.RequestException as e: self.add_finding(f"VirusTotal Domain check failed: {e}", context, is_major=True, finding_type="api")
-        
-        if VT_API_KEY.startswith("YOUR_"): self.add_finding("VirusTotal API key not set.", context); return
-        try:
-            response = requests.get(f"https://www.virustotal.com/api/v3/domains/{domain}", headers=self.headers)
-            res = response.json().get("data", {}).get("attributes", {})
-            stats = res.get("last_analysis_stats", {})
-            malicious_count = stats.get("malicious", 0)
-            self.add_finding(f"VirusTotal Domain '{domain}': {malicious_count} vendors flagged as malicious.", context, score=malicious_count * 10, is_major=malicious_count > 0)
-        except requests.RequestException as e: self.add_finding(f"VirusTotal Domain check failed: {e}", context, is_major=True)
 
     #Uses urlscan.io to analyze URL payload
     def analyze_url(self, url, context):
@@ -311,15 +321,16 @@ class AdvancedEmailAnalyzer:
             scan_headers = {"API-Key": URLSCAN_API_KEY, "Content-Type": "application/json"}
             data = {"url": url, "visibility": "private"}
             response = requests.post('https://urlscan.io/api/v1/scan/', headers=scan_headers, data=json.dumps(data))
+            response.raise_for_status()
             submit_res = response.json()
             self.add_finding(f"urlscan.io report for '{url[:50]}...': {submit_res.get('result')}", context, finding_type="api")
         except requests.RequestException as e: self.add_finding(f"urlscan.io submission failed: {e}", context, is_major=True, finding_type="api")
 
-    # Prints the final report cleanly
+    #Prints the final report cleanly
     def print_final_report(self):
         print("\n" + "="*25 + " FINAL REPORT " + "="*25)
-        
-        # Print structural analysis findings first
+     
+        #Print structural analysis findings first
         for finding in self.report:
             if finding["type"] == "meta":
                  print(f"{finding['context']} {finding['prefix']} {finding['message']}")
@@ -332,41 +343,31 @@ class AdvancedEmailAnalyzer:
         print("\n--- Reputation Findings (API) ---")
         for finding in self.report:
             if finding["type"] == "api":
-                print(f"{finding['context']} {finding['prefix']} {finding['message']} (Score +{finding['score']})")
+                if "urlscan.io" in finding["message"]:
+                    print(f"{finding['context']} {finding['prefix']} {finding['message']}")
+                else:
+                    print(f"{finding['context']} {finding['prefix']} {finding['message']} (Score +{finding['score']})")
 
         print("\n" + "="*22 + " FINAL ASSESSMENT " + "="*21)
         print(f"TOTAL RISK SCORE: {self.risk_score}")
         
         if self.risk_score >= SCORE_THRESHOLD_MALICIOUS:
             print("VERDICT: MALICIOUS")
-
-            has_critical_heuristic = any(f['type'] == 'heuristic' and f['is_major'] for f in self.report)
-
-            malicious_api_sources = set()
-            for f in self.report:
-                if f['type'] == 'api' and f['score'] > 0:
-                    message = f['message'].lower()
-                    if 'virustotal' in message:
-                        malicious_api_sources.add('VirusTotal')
-                    elif 'urlscan.io' in message:
-                        malicious_api_sources.add('urlscan.io')
-
-            num_malicious_apis = len(malicious_api_sources)
-
-            reasoning_parts = []
-            if has_critical_heuristic:
-                reasoning_parts.append("critical heuristic/infrastructure failures")
-            if num_malicious_apis > 0:
-                plural = "s" if num_malicious_apis > 1 else ""
-                reasoning_parts.append(f"malicious indicators from {num_malicious_apis} external API{plural}")
             
+            reasoning_parts = []
+            if any(f['type'] == 'heuristic' and f['is_major'] for f in self.report):
+                reasoning_parts.append("critical heuristic/infrastructure failures")
+            
+            malicious_apis = {f['message'].split(':')[0] for f in self.report if f['type'] == 'api' and f['score'] > 0}
+            if malicious_apis:
+                plural = "s" if len(malicious_apis) > 1 else ""
+                reasoning_parts.append(f"malicious indicators from external API{plural} ({', '.join(malicious_apis)})")
+
             if reasoning_parts:
-                reasoning = " and ".join(reasoning_parts)
-                print(f"Reasoning: High score from {reasoning}.")
+                print(f"Reasoning: High score from " + " and ".join(reasoning_parts) + ".")
             else:
-                #In case small indicators add up
-                print("Reasoning: High score from accumulation of multiple suspicious indicators.")
-        
+                print("Reasoning: High score from an accumulation of multiple suspicious indicators.")
+
         elif self.risk_score >= SCORE_THRESHOLD_SUSPICIOUS:
             print("VERDICT: SUSPICIOUS")
             print("Reasoning: Contains several red flags but lacks definitive malicious indicators.")
@@ -375,12 +376,13 @@ class AdvancedEmailAnalyzer:
             print("Reasoning: Low risk score. No major suspicious indicators were found.")
         print("="*64)
 
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python main.py /path/to/email.eml")
         sys.exit(1)
     
-    if any(key.startswith("YOUR_") for key in [VT_API_KEY, ABUSEIPDB_API_KEY, URLSCAN_API_KEY]):
+    if any(key.startswith("[") for key in [VT_API_KEY, ABUSEIPDB_API_KEY, URLSCAN_API_KEY]):
         print("[WARNING] One or more API keys are missing. Please edit the script and add them.")
 
     analyzer = AdvancedEmailAnalyzer(sys.argv[1])
