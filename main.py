@@ -286,9 +286,9 @@ class AdvancedEmailAnalyzer:
                                         params={"ipAddress": ip})
                 response.raise_for_status()
                 res = response.json().get("data", {})
-                score = res.get("abuseConfidenceScore", 0) # CORRECTED KEY
+                score = res.get("abuseConfidenceScore", 0)
                 self.add_finding(f"AbuseIPDB Confidence Score: {score}%", context, score=score, is_major=score > 50, finding_type="api")
-            except requests.RequestException as e: # CORRECTED EXCEPTION HANDLING
+            except requests.RequestException as e:
                 self.add_finding(f"AbuseIPDB Check failed: {e}", context, is_major=True, finding_type="api")
         else:
             self.add_finding("AbuseIPDB API Key not set.", context, finding_type="api")
